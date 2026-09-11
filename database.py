@@ -26,7 +26,11 @@ def init_db():
                 ai_enabled INTEGER NOT NULL DEFAULT 1,
                 raid_enabled INTEGER NOT NULL DEFAULT 1,
                 spam_enabled INTEGER NOT NULL DEFAULT 1,
-                link_enabled INTEGER NOT NULL DEFAULT 1
+                link_enabled INTEGER NOT NULL DEFAULT 1,
+                mention_enabled INTEGER NOT NULL DEFAULT 1,
+                webhook_enabled INTEGER NOT NULL DEFAULT 1,
+                nuke_enabled INTEGER NOT NULL DEFAULT 1,
+                lockdown_enabled INTEGER NOT NULL DEFAULT 1
             );
             CREATE TABLE IF NOT EXISTS trusted_users (
                 guild_id INTEGER NOT NULL,
@@ -35,6 +39,17 @@ def init_db():
             );
             """
         )
+        # Safe migrations for databases created by an older version.
+        columns = {row[1] for row in con.execute("PRAGMA table_info(guild_settings)").fetchall()}
+        migrations = {
+            "mention_enabled": "INTEGER NOT NULL DEFAULT 1",
+            "webhook_enabled": "INTEGER NOT NULL DEFAULT 1",
+            "nuke_enabled": "INTEGER NOT NULL DEFAULT 1",
+            "lockdown_enabled": "INTEGER NOT NULL DEFAULT 1",
+        }
+        for name, definition in migrations.items():
+            if name not in columns:
+                con.execute(f"ALTER TABLE guild_settings ADD COLUMN {name} {definition}")
         con.commit()
         con.close()
 
@@ -68,7 +83,10 @@ def get_settings(guild_id: int) -> dict:
 
 
 def set_toggle(guild_id: int, field: str, value: bool):
-    allowed = {"protection_enabled", "ai_enabled", "raid_enabled", "spam_enabled", "link_enabled"}
+    allowed = {
+        "protection_enabled", "ai_enabled", "raid_enabled", "spam_enabled",
+        "link_enabled", "mention_enabled", "webhook_enabled", "nuke_enabled", "lockdown_enabled"
+    }
     if field not in allowed:
         raise ValueError("Invalid toggle")
     ensure_guild(guild_id)
