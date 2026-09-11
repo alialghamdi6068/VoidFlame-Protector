@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands
-from database import get_settings, set_channel, ensure_guild
+from database import get_settings, ensure_guild
 
 
 class LoggingSystem(commands.Cog):
@@ -16,7 +16,7 @@ class LoggingSystem(commands.Cog):
         if not isinstance(channel, discord.TextChannel):
             return
         embed = discord.Embed(title=title, description=description[:4000], color=color, timestamp=discord.utils.utcnow())
-        embed.set_footer(text="VoidFlame Protector")
+        embed.set_footer(text="VoidFlame Protector • Security Log")
         if actor:
             embed.set_author(name=str(actor), icon_url=actor.display_avatar.url)
         try:
@@ -24,31 +24,35 @@ class LoggingSystem(commands.Cog):
         except (discord.Forbidden, discord.HTTPException):
             pass
 
-    @commands.command(name="لوق")
-    @commands.has_guild_permissions(administrator=True)
-    async def set_log(self, ctx, channel: discord.TextChannel):
-        set_channel(ctx.guild.id, "log_channel_id", channel.id)
-        await ctx.reply(f"تم تعيين روم اللوق إلى {channel.mention}.")
-        await self.send_log(ctx.guild, "Log system configured", f"Log channel: {channel.mention}", actor=ctx.author)
-
-    @discord.app_commands.command(name="logs", description="Set the comprehensive security log channel")
-    @discord.app_commands.default_permissions(administrator=True)
-    async def set_log_slash(self, interaction: discord.Interaction, channel: discord.TextChannel):
-        set_channel(interaction.guild.id, "log_channel_id", channel.id)
-        await interaction.response.send_message(f"تم تعيين روم اللوق إلى {channel.mention}.")
-
     @commands.Cog.listener()
     async def on_guild_join(self, guild):
         ensure_guild(guild.id)
         await self.send_log(guild, "Bot joined server", f"Guild: **{guild.name}**\nID: `{guild.id}`", color=discord.Color.green())
 
     @commands.Cog.listener()
+    async def on_guild_remove(self, guild):
+        # The log channel may no longer be accessible, so this is intentionally best-effort.
+        await self.send_log(guild, "Bot left server", f"Guild: **{guild.name}**\nID: `{guild.id}`", color=discord.Color.red())
+
+    @commands.Cog.listener()
+    async def on_guild_update(self, before, after):
+        changes = []
+        if before.name != after.name:
+            changes.append(f"Name: `{before.name}` → `{after.name}`")
+        if before.icon != after.icon:
+            changes.append("Server icon changed")
+        if before.owner_id != after.owner_id:
+            changes.append(f"Owner ID: `{before.owner_id}` → `{after.owner_id}`")
+        if changes:
+            await self.send_log(after, "Server updated", "\n".join(changes), color=discord.Color.orange())
+
+    @commands.Cog.listener()
     async def on_member_join(self, member):
-        await self.send_log(member.guild, "Member joined", f"Member: {member.mention}\nID: `{member.id}`\nAccount: <t:{int(member.created_at.timestamp())}:R>", color=discord.Color.green())
+        await self.send_log(member.guild, "Member joined", f"Member: {member.mention}\nID: `{member.id}`\nAccount: <t:{int(member.created_at.timestamp())}:R>", color=discord.Color.green(), actor=member)
 
     @commands.Cog.listener()
     async def on_member_remove(self, member):
-        await self.send_log(member.guild, "Member left", f"Member: **{member}**\nID: `{member.id}`", color=discord.Color.orange())
+        await self.send_log(member.guild, "Member left", f"Member: **{member}**\nID: `{member.id}`", color=discord.Color.orange(), actor=member)
 
     @commands.Cog.listener()
     async def on_member_update(self, before, after):
@@ -57,19 +61,35 @@ class LoggingSystem(commands.Cog):
             changes.append(f"Name: `{before.display_name}` → `{after.display_name}`")
         if before.avatar != after.avatar:
             changes.append("Avatar changed")
+        before_roles = {r.id for r in before.roles}
+        after_roles = {r.id for r in after.roles}
+        added = after_roles - before_roles
+        removed = before_roles - after_roles
+        if added:
+            changes.append("Roles added: " + ", ".join(f"`{after.guild.get_role(r).name}`" for r in added if after.guild.get_role(r)))
+        if removed:
+            changes.append("Roles removed: " + ", ".join(f"`{before.guild.get_role(r).name}`" for r in removed if before.guild.get_role(r)))
         if changes:
             await self.send_log(after.guild, "Member updated", f"Member: {after.mention}\n" + "\n".join(changes), actor=after)
+
+    @commands.Cog.listener()
+    async def on_member_ban(self, guild, user):
+        await self.send_log(guild, "Member banned", f"Member: **{user}**\nID: `{user.id}`", color=discord.Color.red(), actor=user)
+
+    @commands.Cog.listener()
+    async def on_member_unban(self, guild, user):
+        await self.send_log(guild, "Member unbanned", f"Member: **{user}**\nID: `{user.id}`", color=discord.Color.green(), actor=user)
 
     @commands.Cog.listener()
     async def on_message_delete(self, message):
         if message.guild and not message.author.bot:
             content = message.content or "[no text]"
-            await self.send_log(message.guild, "Message deleted", f"Author: {message.author.mention}\nChannel: {message.channel.mention}\nContent: `{content[:1800]}`", color=discord.Color.red())
+            await self.send_log(message.guild, "Message deleted", f"Author: {message.author.mention}\nChannel: {message.channel.mention}\nContent: `{content[:1800]}`", color=discord.Color.red(), actor=message.author)
 
     @commands.Cog.listener()
     async def on_message_edit(self, before, after):
         if before.guild and before.content != after.content and not before.author.bot:
-            await self.send_log(before.guild, "Message edited", f"Author: {before.author.mention}\nChannel: {before.channel.mention}\nBefore: `{before.content[:800]}`\nAfter: `{after.content[:800]}`", color=discord.Color.orange())
+            await self.send_log(before.guild, "Message edited", f"Author: {before.author.mention}\nChannel: {before.channel.mention}\nBefore: `{before.content[:800]}`\nAfter: `{after.content[:800]}`", color=discord.Color.orange(), actor=before.author)
 
     @commands.Cog.listener()
     async def on_guild_channel_create(self, channel):
@@ -81,8 +101,13 @@ class LoggingSystem(commands.Cog):
 
     @commands.Cog.listener()
     async def on_guild_channel_update(self, before, after):
+        changes = []
         if before.name != after.name:
-            await self.send_log(after.guild, "Channel renamed", f"Before: `{before.name}`\nAfter: `{after.name}`", color=discord.Color.orange())
+            changes.append(f"Name: `{before.name}` → `{after.name}`")
+        if before.position != after.position:
+            changes.append("Position changed")
+        if changes:
+            await self.send_log(after.guild, "Channel updated", f"Channel: {after.mention}\n" + "\n".join(changes), color=discord.Color.orange())
 
     @commands.Cog.listener()
     async def on_guild_role_create(self, role):
@@ -99,8 +124,14 @@ class LoggingSystem(commands.Cog):
             changes.append(f"Name: `{before.name}` → `{after.name}`")
         if before.permissions != after.permissions:
             changes.append("Permissions changed")
+        if before.position != after.position:
+            changes.append("Position changed")
         if changes:
             await self.send_log(after.guild, "Role updated", f"Role: {after.mention}\n" + "\n".join(changes), color=discord.Color.orange())
+
+    @commands.Cog.listener()
+    async def on_webhooks_update(self, channel):
+        await self.send_log(channel.guild, "Webhooks updated", f"Channel: {channel.mention}", color=discord.Color.orange())
 
 
 async def setup(bot):
