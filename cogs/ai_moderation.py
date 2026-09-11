@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from datetime import timedelta
 import aiohttp
 import discord
 from discord.ext import commands
@@ -91,8 +92,8 @@ class AIModeration(commands.Cog):
             except discord.HTTPException:
                 pass
             try:
-                await message.author.timeout(discord.utils.utcnow() + discord.timedelta(minutes=AI_TIMEOUT_MINUTES), reason="VoidFlame AI: high-confidence harmful message")
-            except (discord.Forbidden, discord.HTTPException, AttributeError):
+                await message.author.timeout(timedelta(minutes=AI_TIMEOUT_MINUTES), reason="VoidFlame AI: high-confidence harmful message")
+            except (discord.Forbidden, discord.HTTPException):
                 pass
             if logger:
                 await logger.send_log(message.guild, "AI action: timeout", f"Member: {message.author.mention}\nChannel: {message.channel.mention}\nConfidence: **{confidence * 100:.1f}%**\nCategory: `{result['category']}`\nReason: {result['reason']}", color=discord.Color.red())
