@@ -2,10 +2,12 @@ import asyncio
 import json
 import logging
 from datetime import timedelta
+
 import aiohttp
 import discord
 from discord.ext import commands
-from config import AI_API_KEY, GEMINI_MODEL, AI_TIMEOUT, AI_HIGH_CONFIDENCE, AI_LOW_CONFIDENCE, AI_TIMEOUT_MINUTES
+
+from config import AI_API_KEY, GEMINI_MODEL, AI_TIMEOUT, AI_HIGH_CONFIDENCE, AI_LOW_CONFIDENCE
 from database import get_settings, is_trusted
 
 
@@ -21,6 +23,17 @@ class AIModeration(commands.Cog):
         if self.session and not self.session.closed:
             asyncio.create_task(self.session.close())
 
+    @staticmethod
+    def timeout_minutes(confidence: float) -> int:
+        """Convert AI confidence/severity into a bounded moderation duration."""
+        if confidence >= 0.99:
+            return 30
+        if confidence >= 0.97:
+            return 20
+        if confidence >= 0.95:
+            return 15
+        return 5
+
     async def analyze(self, text: str) -> dict | None:
         if not AI_API_KEY or not self.session:
             return None
@@ -34,7 +47,13 @@ class AIModeration(commands.Cog):
             "Do not treat ordinary disagreement, profanity without a target, jokes, or benign content as harmful. "
             "Never provide extra text outside JSON.\nMESSAGE:\n" + text[:3500]
         )
-        payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0, "responseMimeType": "application/json"}}
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0,
+                "responseMimeType": "application/json",
+            },
+        }
         try:
             timeout = aiohttp.ClientTimeout(total=AI_TIMEOUT)
             async with self.session.post(url, json=payload, timeout=timeout) as response:
@@ -45,7 +64,12 @@ class AIModeration(commands.Cog):
                 raw = data["candidates"][0]["content"]["parts"][0]["text"]
                 result = json.loads(raw)
                 confidence = max(0.0, min(float(result.get("confidence", 0)), 1.0))
-                return {"harmful": bool(result.get("harmful", False)), "confidence": confidence, "category": str(result.get("category", "unknown"))[:100], "reason": str(result.get("reason", ""))[:500]}
+                return {
+                    "harmful": bool(result.get("harmful", False)),
+                    "confidence": confidence,
+                    "category": str(result.get("category", "unknown"))[:100],
+                    "reason": str(result.get("reason", ""))[:500],
+                }
         except (asyncio.TimeoutError, aiohttp.ClientError, KeyError, ValueError, json.JSONDecodeError) as exc:
             logging.warning("AI analysis failed: %s", exc)
             return None
@@ -58,7 +82,11 @@ class AIModeration(commands.Cog):
         channel = message.guild.get_channel(channel_id)
         if not isinstance(channel, discord.TextChannel):
             return
-        embed = discord.Embed(title="AI review required", color=discord.Color.orange(), timestamp=discord.utils.utcnow())
+        embed = discord.Embed(
+            title="AI review required",
+            color=discord.Color.orange(),
+            timestamp=discord.utils.utcnow(),
+        )
         embed.add_field(name="Member", value=f"{message.author.mention} (`{message.author.id}`)", inline=False)
         embed.add_field(name="Channel", value=message.channel.mention, inline=True)
         embed.add_field(name="Confidence", value=f"{result['confidence'] * 100:.1f}%", inline=True)
@@ -80,27 +108,57 @@ class AIModeration(commands.Cog):
             return
         if is_trusted(message.guild.id, message.author.id):
             return
+
         result = await self.analyze(message.content)
         if not result or not result["harmful"]:
             return
 
         confidence = result["confidence"]
         logger = self.bot.get_cog("LoggingSystem")
+
         if confidence >= AI_HIGH_CONFIDENCE:
+            minutes = self.timeout_minutes(confidence)
+            timeout_applied = False
             try:
                 await message.delete()
             except discord.HTTPException:
                 pass
             try:
-                await message.author.timeout(timedelta(minutes=AI_TIMEOUT_MINUTES), reason="VoidFlame AI: high-confidence harmful message")
+                await message.author.timeout(
+                    timedelta(minutes=minutes),
+                    reason=f"VoidFlame AI: harmful message ({confidence:.2f})",
+                )
+                timeout_applied = True
             except (discord.Forbidden, discord.HTTPException):
                 pass
+
             if logger:
-                await logger.send_log(message.guild, "AI action: timeout", f"Member: {message.author.mention}\nChannel: {message.channel.mention}\nConfidence: **{confidence * 100:.1f}%**\nCategory: `{result['category']}`\nReason: {result['reason']}", color=discord.Color.red())
+                await logger.send_log(
+                    message.guild,
+                    "AI action: timeout",
+                    f"Member: {message.author.mention}\n"
+                    f"Channel: {message.channel.mention}\n"
+                    f"Confidence: **{confidence * 100:.1f}%**\n"
+                    f"Timeout: **{minutes} minutes**\n"
+                    f"Applied: **{'yes' if timeout_applied else 'no'}**\n"
+                    f"Category: `{result['category']}`\n"
+                    f"Reason: {result['reason']}",
+                    color=discord.Color.red(),
+                    actor=message.author,
+                )
         elif confidence < AI_LOW_CONFIDENCE:
             await self.staff_alert(message, result)
             if logger:
-                await logger.send_log(message.guild, "AI review requested", f"Member: {message.author.mention}\nConfidence: **{confidence * 100:.1f}%**\nCategory: `{result['category']}`", color=discord.Color.orange())
+                await logger.send_log(
+                    message.guild,
+                    "AI review requested",
+                    f"Member: {message.author.mention}\n"
+                    f"Channel: {message.channel.mention}\n"
+                    f"Confidence: **{confidence * 100:.1f}%**\n"
+                    f"Category: `{result['category']}`",
+                    color=discord.Color.orange(),
+                    actor=message.author,
+                )
 
 
 async def setup(bot):
