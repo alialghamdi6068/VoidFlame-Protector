@@ -1,9 +1,10 @@
 import re
 import time
+from datetime import timedelta
 from collections import defaultdict, deque
 import discord
 from discord.ext import commands
-from database import get_settings, set_channel, set_toggle, add_trusted, remove_trusted, is_trusted
+from database import get_settings, set_channel, add_trusted, remove_trusted, is_trusted
 from config import SPAM_MAX_MESSAGES, SPAM_WINDOW_SECONDS, RAID_JOIN_LIMIT, RAID_WINDOW_SECONDS
 
 INVITE_RE = re.compile(r"(?:https?://)?(?:www\.)?(?:discord\.gg|discord\.com/invite)/[A-Za-z0-9-]+", re.I)
@@ -85,8 +86,8 @@ class Protection(commands.Cog):
 
         if guild.id in self.raid_until and now < self.raid_until[guild.id]:
             try:
-                await member.timeout(discord.utils.utcnow() + discord.utils.timedelta(seconds=30), reason="VoidFlame Anti-Raid")
-            except (discord.Forbidden, discord.HTTPException, AttributeError):
+                await member.timeout(timedelta(seconds=30), reason="VoidFlame Anti-Raid")
+            except (discord.Forbidden, discord.HTTPException):
                 pass
 
     @commands.Cog.listener()
@@ -114,8 +115,8 @@ class Protection(commands.Cog):
             bucket.popleft()
         if len(bucket) >= SPAM_MAX_MESSAGES:
             try:
-                await message.author.timeout(discord.utils.utcnow() + discord.utils.timedelta(seconds=60), reason="VoidFlame Anti-Spam")
-            except (discord.Forbidden, discord.HTTPException, AttributeError):
+                await message.author.timeout(timedelta(seconds=60), reason="VoidFlame Anti-Spam")
+            except (discord.Forbidden, discord.HTTPException):
                 pass
             await self.log(message.guild, "Anti-Spam action", f"Member: {message.author.mention}\nMessages: {len(bucket)} in {SPAM_WINDOW_SECONDS}s", discord.Color.red())
             bucket.clear()
