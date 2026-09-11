@@ -15,10 +15,18 @@ class LoggingSystem(commands.Cog):
         channel = guild.get_channel(channel_id)
         if not isinstance(channel, discord.TextChannel):
             return
-        embed = discord.Embed(title=title, description=description[:4000], color=color, timestamp=discord.utils.utcnow())
+        embed = discord.Embed(
+            title=title,
+            description=description[:4000],
+            color=color,
+            timestamp=discord.utils.utcnow(),
+        )
         embed.set_footer(text="VoidFlame Protector • Security Log")
         if actor:
-            embed.set_author(name=str(actor), icon_url=actor.display_avatar.url)
+            try:
+                embed.set_author(name=str(actor), icon_url=actor.display_avatar.url)
+            except Exception:
+                embed.set_author(name=str(actor))
         try:
             await channel.send(embed=embed)
         except (discord.Forbidden, discord.HTTPException):
@@ -31,7 +39,6 @@ class LoggingSystem(commands.Cog):
 
     @commands.Cog.listener()
     async def on_guild_remove(self, guild):
-        # The log channel may no longer be accessible, so this is intentionally best-effort.
         await self.send_log(guild, "Bot left server", f"Guild: **{guild.name}**\nID: `{guild.id}`", color=discord.Color.red())
 
     @commands.Cog.listener()
@@ -43,12 +50,20 @@ class LoggingSystem(commands.Cog):
             changes.append("Server icon changed")
         if before.owner_id != after.owner_id:
             changes.append(f"Owner ID: `{before.owner_id}` → `{after.owner_id}`")
+        if before.verification_level != after.verification_level:
+            changes.append(f"Verification: `{before.verification_level}` → `{after.verification_level}`")
+        if before.default_notifications != after.default_notifications:
+            changes.append("Default notifications changed")
         if changes:
             await self.send_log(after, "Server updated", "\n".join(changes), color=discord.Color.orange())
 
     @commands.Cog.listener()
     async def on_member_join(self, member):
-        await self.send_log(member.guild, "Member joined", f"Member: {member.mention}\nID: `{member.id}`\nAccount: <t:{int(member.created_at.timestamp())}:R>", color=discord.Color.green(), actor=member)
+        await self.send_log(
+            member.guild, "Member joined",
+            f"Member: {member.mention}\nID: `{member.id}`\nAccount: <t:{int(member.created_at.timestamp())}:R>",
+            color=discord.Color.green(), actor=member,
+        )
 
     @commands.Cog.listener()
     async def on_member_remove(self, member):
@@ -69,6 +84,11 @@ class LoggingSystem(commands.Cog):
             changes.append("Roles added: " + ", ".join(f"`{after.guild.get_role(r).name}`" for r in added if after.guild.get_role(r)))
         if removed:
             changes.append("Roles removed: " + ", ".join(f"`{before.guild.get_role(r).name}`" for r in removed if before.guild.get_role(r)))
+        if before.communication_disabled_until != after.communication_disabled_until:
+            if after.communication_disabled_until:
+                changes.append(f"Timeout until: <t:{int(after.communication_disabled_until.timestamp())}:F>")
+            else:
+                changes.append("Timeout removed")
         if changes:
             await self.send_log(after.guild, "Member updated", f"Member: {after.mention}\n" + "\n".join(changes), actor=after)
 
@@ -85,6 +105,11 @@ class LoggingSystem(commands.Cog):
         if message.guild and not message.author.bot:
             content = message.content or "[no text]"
             await self.send_log(message.guild, "Message deleted", f"Author: {message.author.mention}\nChannel: {message.channel.mention}\nContent: `{content[:1800]}`", color=discord.Color.red(), actor=message.author)
+
+    @commands.Cog.listener()
+    async def on_bulk_message_delete(self, messages):
+        if messages:
+            await self.send_log(messages[0].guild, "Messages bulk deleted", f"Channel: {messages[0].channel.mention}\nCount: **{len(messages)}**", color=discord.Color.red())
 
     @commands.Cog.listener()
     async def on_message_edit(self, before, after):
@@ -106,6 +131,10 @@ class LoggingSystem(commands.Cog):
             changes.append(f"Name: `{before.name}` → `{after.name}`")
         if before.position != after.position:
             changes.append("Position changed")
+        if before.category_id != after.category_id:
+            changes.append("Category changed")
+        if before.overwrites != after.overwrites:
+            changes.append("Permissions/overwrites changed")
         if changes:
             await self.send_log(after.guild, "Channel updated", f"Channel: {after.mention}\n" + "\n".join(changes), color=discord.Color.orange())
 
@@ -128,6 +157,47 @@ class LoggingSystem(commands.Cog):
             changes.append("Position changed")
         if changes:
             await self.send_log(after.guild, "Role updated", f"Role: {after.mention}\n" + "\n".join(changes), color=discord.Color.orange())
+
+    @commands.Cog.listener()
+    async def on_guild_emojis_update(self, guild, before, after):
+        before_ids = {e.id for e in before}
+        after_ids = {e.id for e in after}
+        added = after_ids - before_ids
+        removed = before_ids - after_ids
+        if added or removed:
+            await self.send_log(guild, "Emojis updated", f"Added: **{len(added)}**\nRemoved: **{len(removed)}**", color=discord.Color.orange())
+
+    @commands.Cog.listener()
+    async def on_guild_stickers_update(self, guild, before, after):
+        before_ids = {s.id for s in before}
+        after_ids = {s.id for s in after}
+        added = after_ids - before_ids
+        removed = before_ids - after_ids
+        if added or removed:
+            await self.send_log(guild, "Stickers updated", f"Added: **{len(added)}**\nRemoved: **{len(removed)}**", color=discord.Color.orange())
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member, before, after):
+        changes = []
+        if before.channel != after.channel:
+            if before.channel is None and after.channel:
+                changes.append(f"Joined: {after.channel.mention}")
+            elif before.channel and after.channel is None:
+                changes.append(f"Left: {before.channel.mention}")
+            elif before.channel and after.channel:
+                changes.append(f"Moved: {before.channel.mention} → {after.channel.mention}")
+        if before.self_mute != after.self_mute:
+            changes.append(f"Self mute: **{'ON' if after.self_mute else 'OFF'}**")
+        if before.self_deaf != after.self_deaf:
+            changes.append(f"Self deaf: **{'ON' if after.self_deaf else 'OFF'}")
+        if before.mute != after.mute:
+            changes.append(f"Server mute: **{'ON' if after.mute else 'OFF'}**")
+        if before.deaf != after.deaf:
+            changes.append(f"Server deaf: **{'ON' if after.deaf else 'OFF'}**")
+        if before.suppress != after.suppress:
+            changes.append(f"Suppressed: **{'ON' if after.suppress else 'OFF'}**")
+        if changes:
+            await self.send_log(member.guild, "Voice state updated", f"Member: {member.mention}\n" + "\n".join(changes), color=discord.Color.blurple(), actor=member)
 
     @commands.Cog.listener()
     async def on_webhooks_update(self, channel):
