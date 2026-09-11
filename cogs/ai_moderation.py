@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 from datetime import timedelta
 
 import aiohttp
@@ -25,7 +26,6 @@ class AIModeration(commands.Cog):
 
     @staticmethod
     def timeout_minutes(confidence: float) -> int:
-        """Convert AI confidence/severity into a bounded moderation duration."""
         if confidence >= 0.99:
             return 30
         if confidence >= 0.97:
@@ -34,45 +34,105 @@ class AIModeration(commands.Cog):
             return 15
         return 5
 
+    @staticmethod
+    def parse_json(text: str) -> dict | None:
+        text = (text or "").strip()
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I)
+        text = re.sub(r"\s*```$", "", text).strip()
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", text, flags=re.S)
+            if not match:
+                return None
+            try:
+                value = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                return None
+        return value if isinstance(value, dict) else None
+
     async def analyze(self, text: str) -> dict | None:
         if not AI_API_KEY or not self.session:
+            logging.warning("AI moderation disabled: GEMINI_API_KEY/AI_API_KEY is missing")
             return None
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={AI_API_KEY}"
+
+        model = GEMINI_MODEL or "gemini-2.5-flash"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         prompt = (
-            "You are a Discord safety classifier. Analyze the user's message only. "
-            "Return JSON only with keys: harmful (boolean), confidence (number 0 to 1), "
-            "category (short string), reason (short string). "
-            "Harmful means serious harassment, threats, targeted abuse, scams, malicious spam, "
-            "or other clearly unsafe/toxic content that should be moderated. "
-            "Do not treat ordinary disagreement, profanity without a target, jokes, or benign content as harmful. "
-            "Never provide extra text outside JSON.\nMESSAGE:\n" + text[:3500]
+            "You are a Discord safety classifier. Analyze ONLY the message between MESSAGE tags. "
+            "Return one JSON object with exactly these keys: harmful, confidence, category, reason. "
+            "harmful must be true only for clearly harmful content such as serious threats, targeted harassment, "
+            "hate/abuse, scams, malicious spam, or clearly unsafe behavior. Ordinary profanity, jokes, arguments, "
+            "or harmless insults without serious targeted abuse should normally be false. "
+            "confidence must be a number from 0 to 1 describing your confidence that the message is harmful. "
+            "Keep reason short and do not include instructions for wrongdoing.\n"
+            "MESSAGE:\n" + text[:3500] + "\nEND MESSAGE"
         )
         payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": {
                 "temperature": 0,
                 "responseMimeType": "application/json",
+                "responseSchema": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "harmful": {"type": "BOOLEAN"},
+                        "confidence": {"type": "NUMBER"},
+                        "category": {"type": "STRING"},
+                        "reason": {"type": "STRING"},
+                    },
+                    "required": ["harmful", "confidence", "category", "reason"],
+                },
             },
         }
-        try:
-            timeout = aiohttp.ClientTimeout(total=AI_TIMEOUT)
-            async with self.session.post(url, json=payload, timeout=timeout) as response:
-                if response.status != 200:
-                    logging.warning("Gemini returned HTTP %s", response.status)
-                    return None
-                data = await response.json()
-                raw = data["candidates"][0]["content"]["parts"][0]["text"]
-                result = json.loads(raw)
-                confidence = max(0.0, min(float(result.get("confidence", 0)), 1.0))
-                return {
-                    "harmful": bool(result.get("harmful", False)),
-                    "confidence": confidence,
-                    "category": str(result.get("category", "unknown"))[:100],
-                    "reason": str(result.get("reason", ""))[:500],
-                }
-        except (asyncio.TimeoutError, aiohttp.ClientError, KeyError, ValueError, json.JSONDecodeError) as exc:
-            logging.warning("AI analysis failed: %s", exc)
-            return None
+
+        headers = {"Content-Type": "application/json", "x-goog-api-key": AI_API_KEY}
+        timeout = aiohttp.ClientTimeout(total=AI_TIMEOUT)
+
+        for attempt in range(2):
+            try:
+                async with self.session.post(url, json=payload, headers=headers, timeout=timeout) as response:
+                    body = await response.text()
+                    if response.status != 200:
+                        logging.error("Gemini HTTP %s: %s", response.status, body[:1000])
+                        if response.status in (429, 500, 502, 503, 504) and attempt == 0:
+                            await asyncio.sleep(1)
+                            continue
+                        return None
+
+                    try:
+                        data = json.loads(body)
+                        raw = data["candidates"][0]["content"]["parts"][0]["text"]
+                    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+                        logging.error("Gemini response format error: %s | %s", exc, body[:1000])
+                        return None
+
+                    result = self.parse_json(raw)
+                    if not result:
+                        logging.error("Gemini returned invalid classifier JSON: %s", raw[:1000])
+                        return None
+
+                    confidence = max(0.0, min(float(result.get("confidence", 0)), 1.0))
+                    harmful = result.get("harmful", False)
+                    if isinstance(harmful, str):
+                        harmful = harmful.strip().lower() in {"true", "1", "yes"}
+
+                    return {
+                        "harmful": bool(harmful),
+                        "confidence": confidence,
+                        "category": str(result.get("category", "unknown"))[:100],
+                        "reason": str(result.get("reason", ""))[:500],
+                    }
+            except asyncio.TimeoutError:
+                logging.error("Gemini request timed out (attempt %s/2)", attempt + 1)
+            except aiohttp.ClientError as exc:
+                logging.error("Gemini request failed (attempt %s/2): %s", attempt + 1, exc)
+            except (TypeError, ValueError) as exc:
+                logging.error("Gemini result parsing failed: %s", exc)
+            if attempt == 0:
+                await asyncio.sleep(1)
+
+        return None
 
     async def staff_alert(self, message, result):
         settings = get_settings(message.guild.id)
@@ -82,11 +142,7 @@ class AIModeration(commands.Cog):
         channel = message.guild.get_channel(channel_id)
         if not isinstance(channel, discord.TextChannel):
             return
-        embed = discord.Embed(
-            title="AI review required",
-            color=discord.Color.orange(),
-            timestamp=discord.utils.utcnow(),
-        )
+        embed = discord.Embed(title="AI review required", color=discord.Color.orange(), timestamp=discord.utils.utcnow())
         embed.add_field(name="Member", value=f"{message.author.mention} (`{message.author.id}`)", inline=False)
         embed.add_field(name="Channel", value=message.channel.mention, inline=True)
         embed.add_field(name="Confidence", value=f"{result['confidence'] * 100:.1f}%", inline=True)
@@ -121,7 +177,7 @@ class AIModeration(commands.Cog):
             timeout_applied = False
             try:
                 await message.delete()
-            except discord.HTTPException:
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                 pass
             try:
                 await message.author.timeout(
@@ -155,7 +211,8 @@ class AIModeration(commands.Cog):
                     f"Member: {message.author.mention}\n"
                     f"Channel: {message.channel.mention}\n"
                     f"Confidence: **{confidence * 100:.1f}%**\n"
-                    f"Category: `{result['category']}`",
+                    f"Category: `{result['category']}`\n"
+                    f"Reason: {result['reason']}",
                     color=discord.Color.orange(),
                     actor=message.author,
                 )
