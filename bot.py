@@ -33,11 +33,14 @@ EXTENSIONS = (
 
 
 @bot.event
-async def on_message(message):
+async def on_message(message: discord.Message):
     if message.author.bot:
         return
-    if is_maintenance() and message.content.strip() != "!صيانة":
+
+    # During maintenance only the owner can use !maintenance to restore commands.
+    if is_maintenance() and message.content.strip().lower() != "!maintenance":
         return
+
     await bot.process_commands(message)
 
 
@@ -70,8 +73,16 @@ async def on_ready():
 @bot.tree.interaction_check
 async def maintenance_check(interaction: discord.Interaction):
     if is_maintenance():
-        await interaction.response.send_message("🔧 البوت حاليًا في وضع الصيانة. الأوامر متوقفة مؤقتًا.", ephemeral=True)
-        return False
+        try:
+            owner = await bot.is_owner(interaction.user)
+        except discord.HTTPException:
+            owner = False
+        if not owner:
+            await interaction.response.send_message(
+                "🔧 البوت حاليًا في وضع الصيانة. الأوامر متوقفة مؤقتًا.",
+                ephemeral=True,
+            )
+            return False
     return True
 
 
@@ -103,14 +114,17 @@ async def status_slash(interaction: discord.Interaction):
 
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError):
+    if isinstance(error, commands.NotOwner):
+        await ctx.reply("❌ هذا الأمر مخصص لصاحب البوت فقط.", mention_author=False)
+        return
     if isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ هذا الأمر يحتاج صلاحية Administrator.")
+        await ctx.reply("❌ هذا الأمر يحتاج صلاحية Administrator.", mention_author=False)
         return
     if isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send("❌ ناقصك تحديد المطلوب للأمر. مثال: `!حماية لوق #logs`")
+        await ctx.reply("❌ ناقصك تحديد المطلوب للأمر. مثال: `!حماية لوق #logs`", mention_author=False)
         return
     if isinstance(error, commands.BadArgument):
-        await ctx.send("❌ تأكد من المنشن أو الروم المستخدم في الأمر.")
+        await ctx.reply("❌ تأكد من المنشن أو الروم المستخدم في الأمر.", mention_author=False)
         return
     if isinstance(error, (commands.CommandNotFound, commands.CheckFailure)):
         return
