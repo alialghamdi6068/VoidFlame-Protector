@@ -26,6 +26,7 @@ EXTENSIONS = (
     "cogs.logging_system",
     "cogs.protection",
     "cogs.ai_moderation",
+    "cogs.command_menu",
 )
 
 
@@ -62,7 +63,7 @@ async def protection_slash(interaction: discord.Interaction):
     if cog:
         settings = __import__("database").get_settings(interaction.guild.id)
         enabled = "ON" if settings.get("protection_enabled") else "OFF"
-        await interaction.response.send_message(f"🛡️ **VoidFlame Protector**\nالحماية العامة: **{enabled}**\nاستخدم `/status` أو `!حالةالحماية` للتفاصيل.")
+        await interaction.response.send_message(f"🛡️ **VoidFlame Protector**\nالحماية العامة: **{enabled}**\nاستخدم `/status` أو `!حماية حالة` للتفاصيل.")
     else:
         await interaction.response.send_message("❌ نظام الحماية لم يتم تحميله.", ephemeral=True)
 
@@ -87,7 +88,7 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError):
         await ctx.send("❌ هذا الأمر يحتاج صلاحية Administrator.")
         return
     if isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send("❌ ناقصك تحديد المطلوب للأمر. مثال: `!لوق #logs`")
+        await ctx.send("❌ ناقصك تحديد المطلوب للأمر. مثال: `!حماية لوق #logs`")
         return
     if isinstance(error, commands.BadArgument):
         await ctx.send("❌ تأكد من المنشن أو الروم المستخدم في الأمر.")
