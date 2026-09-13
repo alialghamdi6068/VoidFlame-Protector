@@ -9,13 +9,15 @@ from discord.ext import commands
 from database import get_settings, set_channel, set_toggle, add_trusted, remove_trusted, is_trusted
 from config import (
     SPAM_MAX_MESSAGES, SPAM_WINDOW_SECONDS, RAID_JOIN_LIMIT, RAID_WINDOW_SECONDS,
-    MASS_MENTION_LIMIT, WEBHOOK_LIMIT, LOCKDOWN_SECONDS,
+    MASS_MENTION_LIMIT, WEBHOOK_LIMIT,
 )
 
 INVITE_RE = re.compile(r"(?:https?://)?(?:www\.)?(?:discord\.gg|discord\.com/invite)/[A-Za-z0-9-]+", re.I)
 
 
 class Protection(commands.Cog):
+    """Automatic protection systems. Event history/logging is handled by LoggingSystem."""
+
     def __init__(self, bot):
         self.bot = bot
         self.message_buckets = defaultdict(deque)
@@ -37,14 +39,25 @@ class Protection(commands.Cog):
             except discord.HTTPException:
                 pass
 
+    def is_protected_actor(self, guild, member_id):
+        return is_trusted(guild.id, member_id) or member_id == guild.owner_id
+
     async def security_action(self, guild, member, reason, *, ban=False):
-        if member.bot or is_trusted(guild.id, member.id) or member.id == guild.owner_id:
+        target = guild.get_member(getattr(member, "id", 0))
+        if target is None:
+            return False
+        if target.bot or self.is_protected_actor(guild, target.id):
+            return False
+        me = guild.me
+        if not me:
             return False
         try:
-            if ban:
-                await guild.ban(member, reason=reason, delete_message_seconds=0)
+            if ban and me.guild_permissions.ban_members:
+                await guild.ban(target, reason=reason, delete_message_seconds=0)
+            elif not ban and me.guild_permissions.moderate_members:
+                await target.timeout(timedelta(minutes=10), reason=reason)
             else:
-                await member.timeout(timedelta(minutes=10), reason=reason)
+                return False
             return True
         except (discord.Forbidden, discord.HTTPException):
             return False
@@ -103,7 +116,7 @@ class Protection(commands.Cog):
     async def ai_toggle(self, ctx, mode: str = "on"):
         value = mode.lower() in {"on", "تشغيل", "1", "true"}
         set_toggle(ctx.guild.id, "ai_enabled", value)
-        await ctx.reply(f"AI: **{'ON' if value else 'OFF'}")
+        await ctx.reply(f"AI: **{'ON' if value else 'OFF'}**")
 
     @commands.command(name="قفل")
     @commands.has_guild_permissions(administrator=True)
@@ -114,7 +127,7 @@ class Protection(commands.Cog):
             return
         changed = 0
         for channel in ctx.guild.text_channels:
-            if not channel.permissions_for(ctx.guild.default_role).send_messages:
+            if channel.permissions_for(ctx.guild.default_role).send_messages is False:
                 continue
             try:
                 await channel.set_permissions(ctx.guild.default_role, send_messages=False, reason="VoidFlame emergency lockdown")
@@ -141,11 +154,11 @@ class Protection(commands.Cog):
 
     async def _recent_audit_actor(self, guild, action, target_id, max_age=20):
         try:
-            async for entry in guild.audit_logs(limit=8, action=action):
-                if entry.target and getattr(entry.target, "id", None) == target_id:
-                    created = entry.created_at.timestamp()
-                    if abs(time.time() - created) <= max_age:
-                        return entry.user
+            async for entry in guild.audit_logs(limit=10, action=action):
+                if target_id is not None and getattr(entry.target, "id", None) != target_id:
+                    continue
+                if abs(time.time() - entry.created_at.timestamp()) <= max_age:
+                    return entry.user
         except (discord.Forbidden, discord.HTTPException):
             return None
         return None
@@ -154,39 +167,57 @@ class Protection(commands.Cog):
         settings = get_settings(guild.id)
         if not settings.get("protection_enabled") or not settings.get("nuke_enabled"):
             return
-        actor = await self._recent_audit_actor(guild, action, target.id)
-        if not actor or actor.bot or is_trusted(guild.id, actor.id) or actor.id == guild.owner_id:
+
+        actor = await self._recent_audit_actor(guild, action, getattr(target, "id", None))
+        if not actor or actor.bot or self.is_protected_actor(guild, actor.id):
             return
-        key = (guild.id, actor.id, label)
+
+        key = (guild.id, actor.id)
         now = time.monotonic()
         bucket = self.action_buckets[key]
         bucket.append(now)
         while bucket and now - bucket[0] > 15:
             bucket.popleft()
+
         if len(bucket) >= 3:
-            acted = await self.security_action(guild, actor, f"VoidFlame Anti-Nuke: repeated {label}", ban=False)
+            acted = await self.security_action(guild, actor, f"VoidFlame Anti-Nuke: repeated {label}")
             await self.warn_room(guild, f"🚨 Anti-Nuke: تم رصد تغييرات متكررة بواسطة {actor.mention} ({label}).")
-            await self.log(guild, "Anti-Nuke triggered", f"Actor: {actor.mention}\nAction: `{label}`\nCount: **{len(bucket)}**\nResponse: **{'timeout' if acted else 'failed'}**", discord.Color.dark_red(), actor)
+            await self.log(
+                guild,
+                "Anti-Nuke triggered",
+                f"Actor: {actor.mention}\nAction: `{label}`\nCount: **{len(bucket)}** in **15s**\nResponse: **{'timeout' if acted else 'failed'}**",
+                discord.Color.dark_red(),
+                actor,
+            )
             bucket.clear()
 
     @commands.Cog.listener()
     async def on_member_join(self, member):
         guild = member.guild
         settings = get_settings(guild.id)
-        if not settings.get("protection_enabled") or not settings.get("raid_enabled"):
+        if not settings.get("protection_enabled") or not settings.get("raid_enabled") or member.bot:
             return
+
         now = time.monotonic()
         bucket = self.join_buckets[guild.id]
         bucket.append(now)
         while bucket and now - bucket[0] > RAID_WINDOW_SECONDS:
             bucket.popleft()
+
         if len(bucket) >= RAID_JOIN_LIMIT:
             self.raid_until[guild.id] = now + 60
-            await self.log(guild, "Anti-Raid triggered", f"Detected **{len(bucket)}** joins within **{RAID_WINDOW_SECONDS}s**. New members will be temporarily restricted.", discord.Color.dark_red())
+            await self.log(
+                guild,
+                "Anti-Raid triggered",
+                f"Detected **{len(bucket)}** joins within **{RAID_WINDOW_SECONDS}s**. New members will be temporarily restricted.",
+                discord.Color.dark_red(),
+            )
             await self.warn_room(guild, f"🚨 **Anti-Raid** موجة دخول: {len(bucket)} أعضاء خلال {RAID_WINDOW_SECONDS} ثوانٍ.")
-        if guild.id in self.raid_until and now < self.raid_until[guild.id]:
+
+        if guild.id in self.raid_until and now < self.raid_until[guild.id] and not self.is_protected_actor(guild, member.id):
             try:
-                await member.timeout(timedelta(seconds=30), reason="VoidFlame Anti-Raid")
+                if guild.me and guild.me.guild_permissions.moderate_members:
+                    await member.timeout(timedelta(seconds=30), reason="VoidFlame Anti-Raid")
             except (discord.Forbidden, discord.HTTPException):
                 pass
 
@@ -194,6 +225,7 @@ class Protection(commands.Cog):
     async def on_message(self, message):
         if not message.guild or message.author.bot or is_trusted(message.guild.id, message.author.id):
             return
+
         settings = get_settings(message.guild.id)
         if not settings.get("protection_enabled"):
             return
@@ -201,7 +233,7 @@ class Protection(commands.Cog):
         if settings.get("link_enabled") and INVITE_RE.search(message.content):
             try:
                 await message.delete()
-            except discord.HTTPException:
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                 pass
             await self.warn_room(message.guild, f"⚠️ تم حذف دعوة Discord من {message.author.mention} في {message.channel.mention}.")
             await self.log(message.guild, "Invite link blocked", f"Member: {message.author.mention}\nChannel: {message.channel.mention}", discord.Color.orange(), message.author)
@@ -210,7 +242,7 @@ class Protection(commands.Cog):
         if settings.get("mention_enabled") and len(message.mentions) >= MASS_MENTION_LIMIT:
             try:
                 await message.delete()
-            except discord.HTTPException:
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                 pass
             acted = await self.security_action(message.guild, message.author, "VoidFlame Anti-Mass-Mention")
             await self.warn_room(message.guild, f"⚠️ تم إيقاف منشن جماعي من {message.author.mention}.")
@@ -219,17 +251,21 @@ class Protection(commands.Cog):
 
         if not settings.get("spam_enabled"):
             return
+
         now = time.monotonic()
         bucket = self.message_buckets[(message.guild.id, message.author.id)]
         bucket.append(now)
         while bucket and now - bucket[0] > SPAM_WINDOW_SECONDS:
             bucket.popleft()
         if len(bucket) >= SPAM_MAX_MESSAGES:
+            acted = False
             try:
-                await message.author.timeout(timedelta(seconds=60), reason="VoidFlame Anti-Spam")
+                if message.guild.me and message.guild.me.guild_permissions.moderate_members:
+                    await message.author.timeout(timedelta(seconds=60), reason="VoidFlame Anti-Spam")
+                    acted = True
             except (discord.Forbidden, discord.HTTPException):
                 pass
-            await self.log(message.guild, "Anti-Spam action", f"Member: {message.author.mention}\nMessages: **{len(bucket)}** in **{SPAM_WINDOW_SECONDS}s**", discord.Color.red(), message.author)
+            await self.log(message.guild, "Anti-Spam action", f"Member: {message.author.mention}\nMessages: **{len(bucket)}** in **{SPAM_WINDOW_SECONDS}s**\nResponse: **{'timeout' if acted else 'failed'}**", discord.Color.red(), message.author)
             bucket.clear()
 
     @commands.Cog.listener()
@@ -249,6 +285,16 @@ class Protection(commands.Cog):
         await self._anti_nuke(role.guild, discord.AuditLogAction.role_create, role, "role create")
 
     @commands.Cog.listener()
+    async def on_guild_channel_update(self, before, after):
+        if before.overwrites != after.overwrites:
+            await self._anti_nuke(after.guild, discord.AuditLogAction.channel_update, after, "channel permission update")
+
+    @commands.Cog.listener()
+    async def on_guild_role_update(self, before, after):
+        if before.permissions != after.permissions:
+            await self._anti_nuke(after.guild, discord.AuditLogAction.role_update, after, "role permission update")
+
+    @commands.Cog.listener()
     async def on_webhooks_update(self, channel):
         settings = get_settings(channel.guild.id)
         if not settings.get("protection_enabled") or not settings.get("webhook_enabled"):
@@ -257,19 +303,31 @@ class Protection(commands.Cog):
             webhooks = await channel.webhooks()
         except (discord.Forbidden, discord.HTTPException):
             return
-        if len(webhooks) <= WEBHOOK_LIMIT:
+        if len(webhooks) <= 3:
             return
+
         actor = None
         try:
-            async for entry in channel.guild.audit_logs(limit=5, action=discord.AuditLogAction.webhook_create):
-                if entry.target and getattr(entry.target, "channel_id", channel.id) == channel.id:
+            async for entry in channel.guild.audit_logs(limit=10, action=discord.AuditLogAction.webhook_create):
+                target = entry.target
+                target_channel_id = getattr(target, "channel_id", None)
+                if target_channel_id not in (None, channel.id):
+                    continue
+                if abs(time.time() - entry.created_at.timestamp()) <= 20:
                     actor = entry.user
                     break
         except (discord.Forbidden, discord.HTTPException):
             pass
-        if actor and not actor.bot and not is_trusted(channel.guild.id, actor.id) and actor.id != channel.guild.owner_id:
+
+        if actor and not actor.bot and not self.is_protected_actor(channel.guild, actor.id):
             acted = await self.security_action(channel.guild, actor, "VoidFlame Anti-Webhook")
-            await self.log(channel.guild, "Anti-Webhook", f"Actor: {actor.mention}\nChannel: {channel.mention}\nWebhooks: **{len(webhooks)}**\nResponse: **{'timeout' if acted else 'log only'}**", discord.Color.red(), actor)
+            await self.log(
+                channel.guild,
+                "Anti-Webhook",
+                f"Actor: {actor.mention}\nChannel: {channel.mention}\nWebhooks: **{len(webhooks)}**\nResponse: **{'timeout' if acted else 'log only'}**",
+                discord.Color.red(),
+                actor,
+            )
 
     @discord.app_commands.command(name="logs", description="Set the comprehensive security log channel")
     @discord.app_commands.default_permissions(administrator=True)
