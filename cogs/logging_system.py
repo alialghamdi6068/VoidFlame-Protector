@@ -4,6 +4,8 @@ from database import get_settings, ensure_guild
 
 
 class LoggingSystem(commands.Cog):
+    """Comprehensive server event logging. Protection actions are handled by Protection."""
+
     def __init__(self, bot):
         self.bot = bot
 
@@ -100,7 +102,10 @@ class LoggingSystem(commands.Cog):
                 changes.append("Timeout removed")
         if changes:
             actor, reason = await self.audit_actor(after.guild, discord.AuditLogAction.member_update, after.id)
-            await self.send_log(after.guild, "Member updated", f"Member: {after.mention}\n" + "\n".join(changes) + (f"\nActor: {actor.mention}\nReason: `{reason or 'No reason provided'}`" if actor else ""), color=discord.Color.orange(), actor=actor or after)
+            details = f"Member: {after.mention}\n" + "\n".join(changes)
+            if actor:
+                details += f"\nActor: {actor.mention}\nReason: `{reason or 'No reason provided'}`"
+            await self.send_log(after.guild, "Member updated", details, color=discord.Color.orange(), actor=actor or after)
 
     @commands.Cog.listener()
     async def on_member_ban(self, guild, user):
@@ -114,7 +119,7 @@ class LoggingSystem(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message_delete(self, message):
-        if message.guild and not message.author.bot:
+        if message.guild and message.author and not message.author.bot:
             content = message.content or "[no text]"
             await self.send_log(message.guild, "Message deleted", f"Author: {message.author.mention}\nChannel: {message.channel.mention}\nContent: `{content[:1800]}`", color=discord.Color.red(), actor=message.author)
 
@@ -125,18 +130,18 @@ class LoggingSystem(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message_edit(self, before, after):
-        if before.guild and before.content != after.content and not before.author.bot:
+        if before.guild and before.author and before.content != after.content and not before.author.bot:
             await self.send_log(before.guild, "Message edited", f"Author: {before.author.mention}\nChannel: {before.channel.mention}\nBefore: `{before.content[:800]}`\nAfter: `{after.content[:800]}`", color=discord.Color.orange(), actor=before.author)
 
     @commands.Cog.listener()
     async def on_guild_channel_create(self, channel):
         actor, reason = await self.audit_actor(channel.guild, discord.AuditLogAction.channel_create, channel.id)
-        await self.send_log(channel.guild, "Channel created", f"Channel: {channel.mention}\nType: `{channel.type}`\nReason: `{reason or 'No reason provided'}`", color=discord.Color.green(), actor=actor)
+        await self.send_log(channel.guild, "Channel created", f"Channel: {channel.mention}\nType: `{channel.type}`\nActor: {actor.mention if actor else 'Unknown'}\nReason: `{reason or 'No reason provided'}`", color=discord.Color.green(), actor=actor)
 
     @commands.Cog.listener()
     async def on_guild_channel_delete(self, channel):
         actor, reason = await self.audit_actor(channel.guild, discord.AuditLogAction.channel_delete, channel.id)
-        await self.send_log(channel.guild, "Channel deleted", f"Channel: **{channel.name}`\nID: `{channel.id}`\nActor: {actor.mention if actor else 'Unknown'}\nReason: `{reason or 'No reason provided'}`", color=discord.Color.red(), actor=actor)
+        await self.send_log(channel.guild, "Channel deleted", f"Channel: **{channel.name}**\nID: `{channel.id}`\nActor: {actor.mention if actor else 'Unknown'}\nReason: `{reason or 'No reason provided'}`", color=discord.Color.red(), actor=actor)
 
     @commands.Cog.listener()
     async def on_guild_channel_update(self, before, after):
@@ -151,12 +156,15 @@ class LoggingSystem(commands.Cog):
             changes.append("Permissions/overwrites changed")
         if changes:
             actor, reason = await self.audit_actor(after.guild, discord.AuditLogAction.channel_update, after.id)
-            await self.send_log(after.guild, "Channel updated", f"Channel: {after.mention}\n" + "\n".join(changes) + (f"\nActor: {actor.mention}\nReason: `{reason or 'No reason provided'}`" if actor else ""), color=discord.Color.orange(), actor=actor)
+            details = f"Channel: {after.mention}\n" + "\n".join(changes)
+            if actor:
+                details += f"\nActor: {actor.mention}\nReason: `{reason or 'No reason provided'}`"
+            await self.send_log(after.guild, "Channel updated", details, color=discord.Color.orange(), actor=actor)
 
     @commands.Cog.listener()
     async def on_guild_role_create(self, role):
         actor, reason = await self.audit_actor(role.guild, discord.AuditLogAction.role_create, role.id)
-        await self.send_log(role.guild, "Role created", f"Role: {role.mention}\nID: `{role.id}`\nReason: `{reason or 'No reason provided'}`", color=discord.Color.green(), actor=actor)
+        await self.send_log(role.guild, "Role created", f"Role: {role.mention}\nID: `{role.id}`\nActor: {actor.mention if actor else 'Unknown'}\nReason: `{reason or 'No reason provided'}`", color=discord.Color.green(), actor=actor)
 
     @commands.Cog.listener()
     async def on_guild_role_delete(self, role):
@@ -174,7 +182,10 @@ class LoggingSystem(commands.Cog):
             changes.append("Position changed")
         if changes:
             actor, reason = await self.audit_actor(after.guild, discord.AuditLogAction.role_update, after.id)
-            await self.send_log(after.guild, "Role updated", f"Role: {after.mention}\n" + "\n".join(changes) + (f"\nActor: {actor.mention}\nReason: `{reason or 'No reason provided'}`" if actor else ""), color=discord.Color.orange(), actor=actor)
+            details = f"Role: {after.mention}\n" + "\n".join(changes)
+            if actor:
+                details += f"\nActor: {actor.mention}\nReason: `{reason or 'No reason provided'}`"
+            await self.send_log(after.guild, "Role updated", details, color=discord.Color.orange(), actor=actor)
 
     @commands.Cog.listener()
     async def on_guild_emojis_update(self, guild, before, after):
