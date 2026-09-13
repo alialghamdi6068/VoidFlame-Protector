@@ -7,6 +7,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 from database import init_db, ensure_guild
+from cogs.maintenance import is_maintenance
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
@@ -27,7 +28,17 @@ EXTENSIONS = (
     "cogs.protection",
     "cogs.ai_moderation",
     "cogs.command_menu",
+    "cogs.maintenance",
 )
+
+
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+    if is_maintenance() and message.content.strip() != "!صيانة":
+        return
+    await bot.process_commands(message)
 
 
 @bot.event
@@ -54,6 +65,14 @@ async def setup_hook():
 async def on_ready():
     logging.info("Logged in as %s (%s)", bot.user, bot.user.id)
     logging.info("Connected to %d guild(s)", len(bot.guilds))
+
+
+@bot.tree.interaction_check
+async def maintenance_check(interaction: discord.Interaction):
+    if is_maintenance():
+        await interaction.response.send_message("🔧 البوت حاليًا في وضع الصيانة. الأوامر متوقفة مؤقتًا.", ephemeral=True)
+        return False
+    return True
 
 
 @bot.tree.command(name="protection", description="Show VoidFlame Protector status")
