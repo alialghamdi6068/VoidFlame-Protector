@@ -6,17 +6,17 @@ from collections import defaultdict, deque
 import discord
 from discord.ext import commands
 
-from database import get_settings, set_channel, set_toggle, add_trusted, remove_trusted, is_trusted
+from database import get_settings, is_trusted
 from config import (
     SPAM_MAX_MESSAGES, SPAM_WINDOW_SECONDS, RAID_JOIN_LIMIT, RAID_WINDOW_SECONDS,
-    MASS_MENTION_LIMIT, WEBHOOK_LIMIT,
+    MASS_MENTION_LIMIT,
 )
 
 INVITE_RE = re.compile(r"(?:https?://)?(?:www\.)?(?:discord\.gg|discord\.com/invite)/[A-Za-z0-9-]+", re.I)
 
 
 class Protection(commands.Cog):
-    """Automatic protection systems. Event history/logging is handled by LoggingSystem."""
+    """Automatic protection systems. Command UI is handled by command_menu."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -61,96 +61,6 @@ class Protection(commands.Cog):
             return True
         except (discord.Forbidden, discord.HTTPException):
             return False
-
-    @commands.command(name="لوق")
-    @commands.has_guild_permissions(administrator=True)
-    async def logs(self, ctx, channel: discord.TextChannel):
-        set_channel(ctx.guild.id, "log_channel_id", channel.id)
-        await ctx.reply(f"تم تعيين روم اللوق إلى {channel.mention}.")
-
-    @commands.command(name="انذارات")
-    @commands.has_guild_permissions(administrator=True)
-    async def warnings(self, ctx, channel: discord.TextChannel):
-        set_channel(ctx.guild.id, "warning_channel_id", channel.id)
-        await ctx.reply(f"تم تعيين روم الانذارات إلى {channel.mention}.")
-
-    @commands.command(name="ادارة")
-    @commands.has_guild_permissions(administrator=True)
-    async def staff(self, ctx, channel: discord.TextChannel):
-        set_channel(ctx.guild.id, "staff_channel_id", channel.id)
-        await ctx.reply(f"تم تعيين روم الإدارة إلى {channel.mention}.")
-
-    @commands.command(name="وثوق")
-    @commands.has_guild_permissions(administrator=True)
-    async def trust(self, ctx, member: discord.Member):
-        add_trusted(ctx.guild.id, member.id)
-        await ctx.reply(f"تمت إضافة {member.mention} إلى قائمة الموثوقين.")
-
-    @commands.command(name="ازالةوثوق")
-    @commands.has_guild_permissions(administrator=True)
-    async def untrust(self, ctx, member: discord.Member):
-        remove_trusted(ctx.guild.id, member.id)
-        await ctx.reply(f"تمت إزالة {member.mention} من قائمة الموثوقين.")
-
-    @commands.command(name="حالةالحماية", aliases=["حالة"])
-    @commands.has_guild_permissions(administrator=True)
-    async def status(self, ctx):
-        s = get_settings(ctx.guild.id)
-        labels = {
-            "protection_enabled": "الحماية", "ai_enabled": "AI", "raid_enabled": "Anti-Raid",
-            "spam_enabled": "Anti-Spam", "link_enabled": "Anti-Link", "mention_enabled": "Anti-Mention",
-            "webhook_enabled": "Anti-Webhook", "nuke_enabled": "Anti-Nuke", "lockdown_enabled": "Lockdown",
-        }
-        text = "\n".join(f"{label}: {'ON' if s.get(key) else 'OFF'}" for key, label in labels.items())
-        await ctx.reply(f"🛡️ **VoidFlame Protector**\n{text}")
-
-    @commands.command(name="حماية")
-    @commands.has_guild_permissions(administrator=True)
-    async def enable(self, ctx, mode: str = "on"):
-        value = mode.lower() in {"on", "تشغيل", "1", "true"}
-        set_toggle(ctx.guild.id, "protection_enabled", value)
-        await ctx.reply(f"🛡️ الحماية العامة: **{'ON' if value else 'OFF'}**")
-
-    @commands.command(name="حمايةai")
-    @commands.has_guild_permissions(administrator=True)
-    async def ai_toggle(self, ctx, mode: str = "on"):
-        value = mode.lower() in {"on", "تشغيل", "1", "true"}
-        set_toggle(ctx.guild.id, "ai_enabled", value)
-        await ctx.reply(f"AI: **{'ON' if value else 'OFF'}**")
-
-    @commands.command(name="قفل")
-    @commands.has_guild_permissions(administrator=True)
-    async def lockdown(self, ctx):
-        s = get_settings(ctx.guild.id)
-        if not s.get("lockdown_enabled"):
-            await ctx.reply("❌ نظام القفل الطارئ معطل.")
-            return
-        changed = 0
-        for channel in ctx.guild.text_channels:
-            if channel.permissions_for(ctx.guild.default_role).send_messages is False:
-                continue
-            try:
-                await channel.set_permissions(ctx.guild.default_role, send_messages=False, reason="VoidFlame emergency lockdown")
-                changed += 1
-            except (discord.Forbidden, discord.HTTPException):
-                pass
-        await self.log(ctx.guild, "Emergency lockdown", f"Locked **{changed}** text channels for new messages.", discord.Color.dark_red(), ctx.author)
-        await ctx.reply(f"🚨 تم تفعيل القفل الطارئ على **{changed}** روم.")
-
-    @commands.command(name="فتح")
-    @commands.has_guild_permissions(administrator=True)
-    async def unlock(self, ctx):
-        changed = 0
-        for channel in ctx.guild.text_channels:
-            overwrite = channel.overwrites_for(ctx.guild.default_role)
-            if overwrite.send_messages is False:
-                try:
-                    await channel.set_permissions(ctx.guild.default_role, send_messages=None, reason="VoidFlame lockdown released")
-                    changed += 1
-                except (discord.Forbidden, discord.HTTPException):
-                    pass
-        await self.log(ctx.guild, "Emergency lockdown released", f"Restored **{changed}** text channels.", discord.Color.green(), ctx.author)
-        await ctx.reply(f"تم فتح **{changed}** روم.")
 
     async def _recent_audit_actor(self, guild, action, target_id, max_age=20):
         try:
@@ -332,18 +242,21 @@ class Protection(commands.Cog):
     @discord.app_commands.command(name="logs", description="Set the comprehensive security log channel")
     @discord.app_commands.default_permissions(administrator=True)
     async def logs_slash(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        from database import set_channel
         set_channel(interaction.guild.id, "log_channel_id", channel.id)
         await interaction.response.send_message(f"تم تعيين روم اللوق إلى {channel.mention}.")
 
     @discord.app_commands.command(name="warnings", description="Set the warning channel")
     @discord.app_commands.default_permissions(administrator=True)
     async def warnings_slash(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        from database import set_channel
         set_channel(interaction.guild.id, "warning_channel_id", channel.id)
         await interaction.response.send_message(f"تم تعيين روم الانذارات إلى {channel.mention}.")
 
     @discord.app_commands.command(name="staff", description="Set the staff review channel")
     @discord.app_commands.default_permissions(administrator=True)
     async def staff_slash(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        from database import set_channel
         set_channel(interaction.guild.id, "staff_channel_id", channel.id)
         await interaction.response.send_message(f"تم تعيين روم الإدارة إلى {channel.mention}.")
 
