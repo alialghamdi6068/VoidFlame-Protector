@@ -14,16 +14,16 @@ class Maintenance(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.command(name="صيانة")
+    @commands.command(name="maintenance")
     @commands.is_owner()
     async def maintenance(self, ctx):
         global maintenance_mode
         maintenance_mode = not maintenance_mode
 
         if maintenance_mode:
-            await ctx.reply("🔧 تم تفعيل وضع الصيانة. جميع أوامر البوت متوقفة مؤقتًا.")
+            await ctx.reply("🔧 تم تفعيل وضع الصيانة. جميع أوامر البوت متوقفة مؤقتًا.", mention_author=False)
         else:
-            await ctx.reply("✅ تم إنهاء الصيانة. جميع أوامر البوت تعمل الآن.")
+            await ctx.reply("✅ تم إنهاء الصيانة. جميع أوامر البوت تعمل الآن.", mention_author=False)
 
 
 async def setup(bot):
